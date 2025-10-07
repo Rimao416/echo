@@ -1,23 +1,16 @@
 """
-Script de preprocessing pour transformer des livres audio en dataset TTS
-Compatible Windows - Optimisé pour 18h d'audio MP3
+Script de transcription optimisé pour segments audio déjà découpés
+Utilise Faster-Whisper pour vitesse maximale sur CPU
 """
 
 import os
 import sys
-import json
-import torch
-import torchaudio
-import whisper
-import librosa
-import soundfile as sf
-import numpy as np
+import warnings
 from pathlib import Path
-from pydub import AudioSegment
-from pydub.silence import split_on_silence
 from tqdm import tqdm
 from datetime import timedelta
-import warnings
+import librosa
+
 warnings.filterwarnings('ignore')
 
 # ============================================
@@ -25,58 +18,37 @@ warnings.filterwarnings('ignore')
 # ============================================
 
 # Chemins
-INPUT_DIR = r"C:\Users\Computer\Downloads\Training"
+WAVS_DIR = r"C:\Users\Computer\Downloads\Training\dataset_prepared\wavs"
 OUTPUT_DIR = r"C:\Users\Computer\Downloads\Training\dataset_prepared"
-WAVS_DIR = os.path.join(OUTPUT_DIR, "wavs")
 METADATA_FILE = os.path.join(OUTPUT_DIR, "metadata.csv")
 
-# Paramètres audio
-TARGET_SAMPLE_RATE = 22050  # Standard pour TTS
-MIN_SEGMENT_LENGTH = 2.0    # secondes
-MAX_SEGMENT_LENGTH = 10.0   # secondes
-SILENCE_THRESH = -40        # dB (ajuster si trop/pas assez de découpage)
-MIN_SILENCE_LEN = 500       # ms
-
 # Paramètres transcription
-WHISPER_MODEL = "large-v3"  # Options: tiny, base, small, medium, large-v3
+WHISPER_MODEL = "small"  # Options: tiny, base, small, medium, large-v3
 LANGUAGE = "fr"
 
+# Mode test (traiter seulement quelques fichiers)
+TEST_MODE = False  # Mettez True pour tester
+MAX_FILES_TEST = 20
+
 # Validation qualité
-MIN_AUDIO_QUALITY_DB = -30  # Rejeter segments trop faibles
-MAX_AUDIO_LENGTH_CHARS = 200  # Rejeter transcriptions trop longues
+MAX_TEXT_LENGTH = 200  # Caractères max
+MIN_TEXT_LENGTH = 5    # Caractères min
 
 # ============================================
 # FONCTIONS UTILITAIRES
 # ============================================
 
-def setup_directories():
-    """Crée la structure de dossiers"""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(WAVS_DIR, exist_ok=True)
-    print(f"✅ Dossiers créés:\n  - {OUTPUT_DIR}\n  - {WAVS_DIR}")
-
-def get_audio_files(directory):
-    """Récupère tous les fichiers audio MP3"""
-    audio_files = []
-    for root, dirs, files in os.walk(directory):
-        for file in files:
-            if file.lower().endswith('.mp3'):
-                audio_files.append(os.path.join(root, file))
-    return sorted(audio_files)
+def get_wav_files(directory):
+    """Récupère tous les fichiers WAV"""
+    wav_files = []
+    for file in os.listdir(directory):
+        if file.lower().endswith('.wav'):
+            wav_files.append(os.path.join(directory, file))
+    return sorted(wav_files)
 
 def format_duration(seconds):
     """Formate la durée en heures:minutes:secondes"""
     return str(timedelta(seconds=int(seconds)))
-
-def calculate_rms(audio_segment):
-    """Calcule le volume RMS en dB"""
-    return audio_segment.dBFS
-
-def normalize_audio(audio_segment):
-    """Normalise le volume audio"""
-    target_dBFS = -20.0
-    change_in_dBFS = target_dBFS - audio_segment.dBFS
-    return audio_segment.apply_gain(change_in_dBFS)
 
 def clean_text(text):
     """Nettoie le texte transcrit"""
@@ -87,69 +59,85 @@ def clean_text(text):
         text = text[0].upper() + text[1:]
     return text.strip()
 
+def calculate_total_duration(wav_files):
+    """Calcule la durée totale des fichiers audio"""
+    total_duration = 0
+    print("📊 Calcul de la durée totale...")
+    for wav_file in tqdm(wav_files[:100], desc="Échantillonnage"):  # Sample pour estimation
+        try:
+            audio, sr = librosa.load(wav_file, sr=None, duration=0.1)
+            # Estimer durée complète
+            import soundfile as sf
+            info = sf.info(wav_file)
+            total_duration += info.duration
+        except:
+            pass
+    
+    # Si moins de 100 fichiers, c'est exact, sinon on extrapole
+    if len(wav_files) > 100:
+        total_duration = total_duration * (len(wav_files) / 100)
+    
+    return total_duration
+
 # ============================================
-# PREPROCESSING PRINCIPAL
+# TRANSCRIPTION AVEC FASTER-WHISPER
 # ============================================
 
-def load_and_split_audio(mp3_path):
+def transcribe_with_faster_whisper(wav_files, model):
     """
-    Charge un MP3 et le découpe en segments basés sur les silences
+    Transcrit tous les segments audio avec Faster-Whisper
     """
-    print(f"\n📂 Traitement: {os.path.basename(mp3_path)}")
-    
-    # Charger l'audio
-    audio = AudioSegment.from_mp3(mp3_path)
-    duration = len(audio) / 1000.0  # en secondes
-    print(f"   Durée totale: {format_duration(duration)}")
-    
-    # Normaliser le volume
-    audio = normalize_audio(audio)
-    
-    # Découper sur les silences
-    print(f"   🔪 Découpage en cours...")
-    chunks = split_on_silence(
-        audio,
-        min_silence_len=MIN_SILENCE_LEN,
-        silence_thresh=SILENCE_THRESH,
-        keep_silence=200  # Garde 200ms de silence aux bords
-    )
-    
-    print(f"   ✅ {len(chunks)} segments détectés")
-    
-    # Filtrer les segments par durée
-    valid_chunks = []
-    for chunk in chunks:
-        duration_sec = len(chunk) / 1000.0
-        if MIN_SEGMENT_LENGTH <= duration_sec <= MAX_SEGMENT_LENGTH:
-            # Vérifier qualité audio
-            if calculate_rms(chunk) > MIN_AUDIO_QUALITY_DB:
-                valid_chunks.append(chunk)
-    
-    print(f"   ✅ {len(valid_chunks)} segments valides (après filtrage)")
-    return valid_chunks
-
-def export_segment(segment, output_path):
-    """
-    Exporte un segment audio en WAV avec le bon sample rate
-    """
-    # Export temporaire
-    temp_path = output_path.replace('.wav', '_temp.wav')
-    segment.export(temp_path, format="wav")
-    
-    # Resample avec librosa
-    audio, sr = librosa.load(temp_path, sr=TARGET_SAMPLE_RATE, mono=True)
-    sf.write(output_path, audio, TARGET_SAMPLE_RATE)
-    
-    # Nettoyer fichier temp
-    os.remove(temp_path)
-
-def transcribe_segments(wav_files, model):
-    """
-    Transcrit tous les segments audio avec Whisper
-    """
-    print(f"\n🎤 Transcription avec Whisper ({WHISPER_MODEL})...")
+    print(f"\n🎤 Transcription avec Faster-Whisper ({WHISPER_MODEL})...")
     
     metadata = []
+    errors = []
+    
+    for wav_file in tqdm(wav_files, desc="Transcription"):
+        try:
+            # Transcription optimisée
+            segments, info = model.transcribe(
+                wav_file,
+                language=LANGUAGE,
+                beam_size=1,  # Plus rapide (1 au lieu de 5)
+                vad_filter=True,  # Ignore les silences
+                temperature=0.0  # Déterministe
+            )
+            
+            # Combiner tous les segments
+            text = " ".join([segment.text for segment in segments])
+            text = clean_text(text)
+            
+            # Validation
+            if len(text) < MIN_TEXT_LENGTH:
+                errors.append((wav_file, "Texte trop court"))
+                continue
+            
+            if len(text) > MAX_TEXT_LENGTH:
+                errors.append((wav_file, "Texte trop long"))
+                continue
+            
+            # Ajouter à metadata
+            filename = os.path.basename(wav_file)
+            metadata.append(f"{filename}|{text}")
+            
+        except Exception as e:
+            errors.append((wav_file, str(e)))
+            continue
+    
+    return metadata, errors
+
+# ============================================
+# TRANSCRIPTION AVEC WHISPER STANDARD (FALLBACK)
+# ============================================
+
+def transcribe_with_standard_whisper(wav_files, model):
+    """
+    Transcrit avec Whisper standard (si Faster-Whisper pas disponible)
+    """
+    print(f"\n🎤 Transcription avec Whisper standard ({WHISPER_MODEL})...")
+    
+    metadata = []
+    errors = []
     
     for wav_file in tqdm(wav_files, desc="Transcription"):
         try:
@@ -158,15 +146,20 @@ def transcribe_segments(wav_files, model):
                 wav_file,
                 language=LANGUAGE,
                 task="transcribe",
-                fp16=False  # CPU compatible
+                fp16=False,
+                condition_on_previous_text=False,
+                temperature=0.0
             )
             
             text = clean_text(result["text"])
             
             # Validation
-            if len(text) < 5:  # Trop court
+            if len(text) < MIN_TEXT_LENGTH:
+                errors.append((wav_file, "Texte trop court"))
                 continue
-            if len(text) > MAX_AUDIO_LENGTH_CHARS:  # Trop long
+            
+            if len(text) > MAX_TEXT_LENGTH:
+                errors.append((wav_file, "Texte trop long"))
                 continue
             
             # Ajouter à metadata
@@ -174,10 +167,10 @@ def transcribe_segments(wav_files, model):
             metadata.append(f"{filename}|{text}")
             
         except Exception as e:
-            print(f"\n⚠️ Erreur transcription {wav_file}: {e}")
+            errors.append((wav_file, str(e)))
             continue
     
-    return metadata
+    return metadata, errors
 
 # ============================================
 # PIPELINE PRINCIPAL
@@ -185,69 +178,95 @@ def transcribe_segments(wav_files, model):
 
 def main():
     print("=" * 60)
-    print("🎙️  PREPROCESSING AUDIOBOOK → TTS DATASET")
+    print("🎙️  TRANSCRIPTION RAPIDE AVEC FASTER-WHISPER")
     print("=" * 60)
     
-    # 1. Setup
-    setup_directories()
-    
-    # 2. Trouver les fichiers MP3
-    print(f"\n🔍 Recherche des fichiers MP3 dans: {INPUT_DIR}")
-    mp3_files = get_audio_files(INPUT_DIR)
-    
-    if not mp3_files:
-        print("❌ Aucun fichier MP3 trouvé !")
+    # 1. Vérifier que le dossier existe
+    if not os.path.exists(WAVS_DIR):
+        print(f"❌ ERREUR: Dossier introuvable: {WAVS_DIR}")
         return
     
-    print(f"✅ {len(mp3_files)} fichier(s) trouvé(s)")
+    # 2. Trouver les fichiers WAV
+    print(f"\n🔍 Recherche des fichiers WAV dans: {WAVS_DIR}")
+    wav_files = get_wav_files(WAVS_DIR)
+    
+    if not wav_files:
+        print("❌ Aucun fichier WAV trouvé !")
+        return
+    
+    print(f"✅ {len(wav_files)} fichier(s) trouvé(s)")
+    
+    # Mode test
+    if TEST_MODE:
+        wav_files = wav_files[:MAX_FILES_TEST]
+        print(f"⚠️  MODE TEST: Traitement de {len(wav_files)} fichiers seulement")
     
     # Calculer durée totale
-    total_duration = 0
-    for mp3 in mp3_files:
-        audio = AudioSegment.from_mp3(mp3)
-        total_duration += len(audio) / 1000.0
+    total_duration = calculate_total_duration(wav_files)
+    print(f"📊 Durée totale estimée: {format_duration(total_duration)}")
     
-    print(f"📊 Durée totale: {format_duration(total_duration)}")
-    
-    # 3. Découpage et export
+    # 3. Charger le modèle
     print(f"\n{'='*60}")
-    print("PHASE 1: DÉCOUPAGE")
+    print("CHARGEMENT DU MODÈLE")
     print(f"{'='*60}")
     
-    segment_counter = 0
-    all_wav_files = []
+    use_faster_whisper = True
     
-    for mp3_file in mp3_files:
-        chunks = load_and_split_audio(mp3_file)
+    try:
+        from faster_whisper import WhisperModel
+        print(f"⏳ Chargement de Faster-Whisper '{WHISPER_MODEL}'...")
+        print("   (Optimisé pour CPU - 4-5x plus rapide)")
         
-        # Exporter chaque segment
-        for i, chunk in enumerate(tqdm(chunks, desc="Export segments")):
-            segment_counter += 1
-            output_filename = f"segment_{segment_counter:05d}.wav"
-            output_path = os.path.join(WAVS_DIR, output_filename)
-            
-            export_segment(chunk, output_path)
-            all_wav_files.append(output_path)
-    
-    print(f"\n✅ {len(all_wav_files)} segments exportés")
+        model = WhisperModel(
+            WHISPER_MODEL,
+            device="cpu",
+            compute_type="int8",  # Optimisation CPU
+            num_workers=4  # Threads parallèles
+        )
+        print("✅ Faster-Whisper chargé avec succès !")
+        
+    except ImportError:
+        print("⚠️  Faster-Whisper non installé, utilisation de Whisper standard")
+        print("   Pour installer: pip install faster-whisper")
+        use_faster_whisper = False
+        
+        import whisper
+        print(f"⏳ Chargement de Whisper '{WHISPER_MODEL}'...")
+        model = whisper.load_model(WHISPER_MODEL)
+        print("✅ Whisper chargé")
     
     # 4. Transcription
     print(f"\n{'='*60}")
-    print("PHASE 2: TRANSCRIPTION")
+    print("TRANSCRIPTION EN COURS")
     print(f"{'='*60}")
     
-    print(f"⏳ Chargement du modèle Whisper '{WHISPER_MODEL}'...")
-    print("   (Cela peut prendre quelques minutes la première fois)")
+    # Estimation du temps
+    if WHISPER_MODEL == "tiny":
+        time_per_sec = 0.5
+    elif WHISPER_MODEL == "base":
+        time_per_sec = 1.0 if use_faster_whisper else 3.0
+    elif WHISPER_MODEL == "small":
+        time_per_sec = 2.0 if use_faster_whisper else 5.0
+    elif WHISPER_MODEL == "medium":
+        time_per_sec = 4.0 if use_faster_whisper else 10.0
+    else:  # large
+        time_per_sec = 8.0 if use_faster_whisper else 20.0
     
-    model = whisper.load_model(WHISPER_MODEL)
-    print("✅ Modèle chargé")
+    estimated_time = total_duration * time_per_sec
+    print(f"⏱️  Temps estimé: {format_duration(estimated_time)}")
+    print(f"🚀 Démarrage de la transcription...\n")
     
-    metadata_entries = transcribe_segments(all_wav_files, model)
+    if use_faster_whisper:
+        metadata_entries, errors = transcribe_with_faster_whisper(wav_files, model)
+    else:
+        metadata_entries, errors = transcribe_with_standard_whisper(wav_files, model)
     
     # 5. Sauvegarder metadata
     print(f"\n{'='*60}")
-    print("PHASE 3: FINALISATION")
+    print("SAUVEGARDE DES RÉSULTATS")
     print(f"{'='*60}")
+    
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     with open(METADATA_FILE, 'w', encoding='utf-8') as f:
         for entry in metadata_entries:
@@ -255,39 +274,63 @@ def main():
     
     print(f"✅ Metadata sauvegardé: {METADATA_FILE}")
     
+    # Sauvegarder les erreurs
+    if errors:
+        error_file = os.path.join(OUTPUT_DIR, "errors.txt")
+        with open(error_file, 'w', encoding='utf-8') as f:
+            for wav_file, error in errors:
+                f.write(f"{os.path.basename(wav_file)}: {error}\n")
+        print(f"⚠️  Fichier d'erreurs: {error_file}")
+    
     # 6. Statistiques finales
     valid_segments = len(metadata_entries)
-    total_segments = len(all_wav_files)
+    total_segments = len(wav_files)
+    failed_segments = len(errors)
     success_rate = (valid_segments / total_segments * 100) if total_segments > 0 else 0
-    
-    # Calculer durée finale
-    final_duration = 0
-    for wav in all_wav_files:
-        if os.path.exists(wav):
-            audio, sr = librosa.load(wav, sr=None)
-            final_duration += len(audio) / sr
     
     print(f"\n{'='*60}")
     print("📊 RÉSUMÉ")
     print(f"{'='*60}")
-    print(f"✅ Segments totaux créés: {total_segments}")
-    print(f"✅ Segments valides (avec transcription): {valid_segments}")
+    print(f"✅ Fichiers traités: {total_segments}")
+    print(f"✅ Transcriptions valides: {valid_segments}")
+    print(f"❌ Erreurs/Rejets: {failed_segments}")
     print(f"✅ Taux de succès: {success_rate:.1f}%")
-    print(f"✅ Durée finale du dataset: {format_duration(final_duration)}")
-    print(f"✅ Sample rate: {TARGET_SAMPLE_RATE} Hz")
-    print(f"\n📁 Dossier de sortie: {OUTPUT_DIR}")
-    print(f"📄 Fichier metadata: {METADATA_FILE}")
+    print(f"✅ Durée du dataset: {format_duration(total_duration)}")
+    print(f"✅ Modèle utilisé: {WHISPER_MODEL}")
+    print(f"✅ Engine: {'Faster-Whisper (optimisé)' if use_faster_whisper else 'Whisper standard'}")
     
-    # 7. Instructions suivantes
+    print(f"\n📁 Fichiers générés:")
+    print(f"   - {METADATA_FILE}")
+    if errors:
+        print(f"   - {error_file}")
+    
+    # 7. Aperçu des transcriptions
+    print(f"\n{'='*60}")
+    print("📝 APERÇU DES TRANSCRIPTIONS")
+    print(f"{'='*60}")
+    
+    for i, entry in enumerate(metadata_entries[:5]):
+        filename, text = entry.split('|', 1)
+        print(f"{i+1}. {filename}")
+        print(f"   {text[:100]}{'...' if len(text) > 100 else ''}\n")
+    
+    if len(metadata_entries) > 5:
+        print(f"... et {len(metadata_entries) - 5} autres transcriptions")
+    
+    # 8. Instructions suivantes
     print(f"\n{'='*60}")
     print("🚀 PROCHAINES ÉTAPES")
     print(f"{'='*60}")
-    print("1. Vérifiez quelques fichiers audio pour la qualité")
-    print("2. Vérifiez metadata.csv pour la précision des transcriptions")
-    print("3. Uploadez le dossier 'dataset_prepared' sur Kaggle")
-    print("4. Utilisez le notebook Kaggle pour l'entraînement")
+    print("1. Vérifiez metadata.csv pour la qualité des transcriptions")
+    print("2. Écoutez quelques fichiers pour validation")
+    if TEST_MODE:
+        print("3. Si satisfait, relancez avec TEST_MODE = False")
+        print("4. Uploadez le dataset complet sur Kaggle")
+    else:
+        print("3. Uploadez le dossier 'dataset_prepared' sur Kaggle")
+        print("4. Lancez l'entraînement TTS sur Kaggle")
     
-    print(f"\n✅ Preprocessing terminé avec succès !")
+    print(f"\n✅ Transcription terminée avec succès !")
 
 # ============================================
 # EXÉCUTION
