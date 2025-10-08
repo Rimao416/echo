@@ -12,6 +12,7 @@
     "elevenlabs": "^1.59.0",
     "lucide-react": "^0.544.0",
     "next": "15.5.4",
+    "pdfjs-dist": "^3.11.174",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },
