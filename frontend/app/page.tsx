@@ -7,28 +7,73 @@ export default function EchoTTS() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  const [selectedVoice, setSelectedVoice] = useState('default');
+  const [selectedVoice, setSelectedVoice] = useState('21m00Tcm4TlvDq8ikWAM'); // Rachel - voix féminine naturelle
   const [speed, setSpeed] = useState(1.0);
   const [showSettings, setShowSettings] = useState(false);
-  const [recordingMode, setRecordingMode] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
 
+  // Meilleures voix ElevenLabs avec émotions
   const voices = [
-    { id: 'default', name: 'Voix par défaut', type: 'Féminine' },
-    { id: 'custom-1', name: 'Ma voix', type: 'Personnalisée' },
-    { id: 'male-1', name: 'Voix masculine', type: 'Masculine' },
+    { id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel', type: 'Féminine - Naturelle' },
+    { id: 'AZnzlk1XvdvUeBnXmlld', name: 'Domi', type: 'Féminine - Confiante' },
+    { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Bella', type: 'Féminine - Douce' },
+    { id: 'ErXwobaYiN019PkySvjV', name: 'Antoni', type: 'Masculine - Chaleureuse' },
+    { id: 'VR6AewLTigWG4xSOukaG', name: 'Arnold', type: 'Masculine - Crispy' },
+    { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', type: 'Masculine - Profonde' },
+    { id: 'yoZ06aMxZJJ28mfd3POQ', name: 'Sam', type: 'Masculine - Dynamique' },
   ];
 
   const handleGenerate = async () => {
-    if (!text.trim()) return;
+    if (!text.trim()) {
+      setError('Veuillez entrer du texte');
+      return;
+    }
     
     setIsGenerating(true);
-    // Simulation - À remplacer par l'appel API backend
-    setTimeout(() => {
-      // Mock audio URL
-      setAudioUrl('mock-audio-url');
+    setError(null);
+    
+    try {
+      const response = await fetch('/api/generate-speech', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: text,
+          voiceId: selectedVoice,
+          modelId: 'eleven_multilingual_v2', // Meilleur modèle pour les émotions
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Erreur lors de la génération audio');
+      }
+
+      const audioBlob = await response.blob();
+      const url = URL.createObjectURL(audioBlob);
+      
+      // Libérer l'ancienne URL si elle existe
+      if (audioUrl) {
+        URL.revokeObjectURL(audioUrl);
+      }
+      
+      setAudioUrl(url);
+      
+      // Jouer automatiquement
+      setTimeout(() => {
+        if (audioRef.current) {
+          audioRef.current.play();
+          setIsPlaying(true);
+        }
+      }, 100);
+      
+    } catch (err) {
+      console.error('Erreur:', err);
+      setError('Impossible de générer l\'audio. Vérifiez votre clé API.');
+    } finally {
       setIsGenerating(false);
-    }, 2000);
+    }
   };
 
   const togglePlayPause = () => {
@@ -43,8 +88,14 @@ export default function EchoTTS() {
   };
 
   const handleDownload = () => {
-    // Logic pour télécharger l'audio
-    console.log('Téléchargement...');
+    if (audioUrl) {
+      const a = document.createElement('a');
+      a.href = audioUrl;
+      a.download = `echo-tts-${Date.now()}.mp3`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
   };
 
   useEffect(() => {
@@ -52,6 +103,14 @@ export default function EchoTTS() {
       audioRef.current.playbackRate = speed;
     }
   }, [speed]);
+
+  useEffect(() => {
+    return () => {
+      if (audioUrl) {
+        URL.revokeObjectURL(audioUrl);
+      }
+    };
+  }, [audioUrl]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white">
@@ -64,7 +123,7 @@ export default function EchoTTS() {
             </div>
             <div>
               <h1 className="text-2xl font-bold">Echo</h1>
-              <p className="text-xs text-slate-400">Synthèse vocale locale</p>
+              <p className="text-xs text-slate-400">Powered by ElevenLabs</p>
             </div>
           </div>
           
@@ -81,6 +140,13 @@ export default function EchoTTS() {
         <div className="grid lg:grid-cols-3 gap-8">
           {/* Main Content */}
           <div className="lg:col-span-2 space-y-6">
+            {/* Error Message */}
+            {error && (
+              <div className="bg-red-500/10 border border-red-500/50 rounded-xl p-4 text-red-400">
+                {error}
+              </div>
+            )}
+
             {/* Text Input */}
             <div className="bg-slate-900/50 backdrop-blur-sm rounded-2xl border border-slate-800/50 overflow-hidden">
               <div className="p-4 border-b border-slate-800/50 flex items-center justify-between">
@@ -94,7 +160,7 @@ export default function EchoTTS() {
               <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                placeholder="Entrez votre texte en français ici... Echo va le transformer en parole naturelle."
+                placeholder="Entrez votre texte ici... Echo va le transformer en parole naturelle avec émotions."
                 className="w-full h-64 p-6 bg-transparent resize-none focus:outline-none text-slate-200 placeholder:text-slate-600"
               />
               
@@ -169,7 +235,13 @@ export default function EchoTTS() {
                   </div>
                 </div>
                 
-                <audio ref={audioRef} src={audioUrl} onEnded={() => setIsPlaying(false)} />
+                <audio 
+                  ref={audioRef} 
+                  src={audioUrl} 
+                  onEnded={() => setIsPlaying(false)}
+                  onPlay={() => setIsPlaying(true)}
+                  onPause={() => setIsPlaying(false)}
+                />
               </div>
             )}
           </div>
@@ -183,7 +255,7 @@ export default function EchoTTS() {
                 Sélection de voix
               </h3>
               
-              <div className="space-y-2">
+              <div className="space-y-2 max-h-96 overflow-y-auto">
                 {voices.map((voice) => (
                   <button
                     key={voice.id}
@@ -199,14 +271,6 @@ export default function EchoTTS() {
                   </button>
                 ))}
               </div>
-
-              <button
-                onClick={() => setRecordingMode(true)}
-                className="w-full mt-4 p-3 rounded-xl border-2 border-dashed border-slate-700 hover:border-violet-500/50 transition-all flex items-center justify-center gap-2 text-sm text-slate-400 hover:text-violet-400"
-              >
-                <Upload className="w-4 h-4" />
-                Créer une nouvelle voix
-              </button>
             </div>
 
             {/* Settings */}
@@ -234,11 +298,15 @@ export default function EchoTTS() {
                     <div className="text-xs text-slate-500 space-y-1">
                       <div className="flex justify-between">
                         <span>Modèle:</span>
-                        <span className="text-slate-400">Coqui XTTS v2</span>
+                        <span className="text-slate-400">Eleven Multilingual v2</span>
                       </div>
                       <div className="flex justify-between">
-                        <span>GPU:</span>
-                        <span className="text-green-400">Actif</span>
+                        <span>Provider:</span>
+                        <span className="text-violet-400">ElevenLabs</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Qualité:</span>
+                        <span className="text-green-400">Premium</span>
                       </div>
                     </div>
                   </div>
@@ -246,30 +314,15 @@ export default function EchoTTS() {
               </div>
             )}
 
-            {/* Stats */}
+            {/* Info */}
             <div className="bg-slate-900/50 backdrop-blur-sm rounded-2xl border border-slate-800/50 p-6">
-              <h3 className="font-semibold mb-4 text-sm text-slate-400">Statistiques</h3>
+              <h3 className="font-semibold mb-4 text-sm text-slate-400">À propos</h3>
               
-              <div className="space-y-3">
-                <div>
-                  <div className="flex justify-between text-sm mb-1">
-                    <span className="text-slate-400">Audios générés</span>
-                    <span className="font-semibold">127</span>
-                  </div>
-                  <div className="h-1 bg-slate-800 rounded-full overflow-hidden">
-                    <div className="h-full w-3/4 bg-gradient-to-r from-violet-600 to-purple-600" />
-                  </div>
-                </div>
-                
-                <div>
-                  <div className="flex justify-between text-sm mb-1">
-                    <span className="text-slate-400">Temps total</span>
-                    <span className="font-semibold">2h 34m</span>
-                  </div>
-                  <div className="h-1 bg-slate-800 rounded-full overflow-hidden">
-                    <div className="h-full w-1/2 bg-gradient-to-r from-violet-600 to-purple-600" />
-                  </div>
-                </div>
+              <div className="text-xs text-slate-500 space-y-2">
+                <p>Echo utilise le modèle <span className="text-violet-400">Eleven Multilingual v2</span> d'ElevenLabs pour une synthèse vocale ultra-réaliste avec émotions naturelles.</p>
+                <p className="pt-2 border-t border-slate-800/50 text-slate-600">
+                  Les voix sont générées en temps réel avec une qualité studio.
+                </p>
               </div>
             </div>
           </div>
