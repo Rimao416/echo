@@ -1,26 +1,45 @@
 "use client"
 import React, { useState, useRef, useEffect } from 'react';
-import { Mic, Play, Pause, Download, Loader2, Volume2, Settings, Sparkles, Upload, Trash2, FileText, SkipForward, SkipBack, BookOpen } from 'lucide-react';
+import { Mic, Play, Pause, Download, Loader2, Volume2, Settings, Sparkles, Trash2, FileText, SkipForward, SkipBack, BookMarked } from 'lucide-react';
+
+// Configuration de l'API Backend
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+
+interface BookData {
+  bookId: string;
+  readingId: string;
+  totalPages: number;
+  currentPage: number;
+  endPage: number;
+  hasMore: boolean;
+  progress: number;
+}
+
+interface Voice {
+  id: string;
+  name: string;
+  type: string;
+}
 
 export default function EchoTTS() {
-  const [text, setText] = useState('');
-  const [pdfText, setPdfText] = useState('');
+  const [text, setText] = useState<string>('');
   const [pdfFile, setPdfFile] = useState<File | null>(null);
-  const [isExtracting, setIsExtracting] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [bookData, setBookData] = useState<BookData | null>(null);
+  const [currentPageStart, setCurrentPageStart] = useState<number>(1);
+  const [isExtracting, setIsExtracting] = useState<boolean>(false);
+  const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  const [selectedVoice, setSelectedVoice] = useState('21m00Tcm4TlvDq8ikWAM');
-  const [speed, setSpeed] = useState(1.0);
-  const [showSettings, setShowSettings] = useState(false);
+  const [selectedVoice, setSelectedVoice] = useState<string>('21m00Tcm4TlvDq8ikWAM');
+  const [speed, setSpeed] = useState<number>(1.0);
+  const [showSettings, setShowSettings] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const [currentChunk, setCurrentChunk] = useState(0);
-  const [chunks, setChunks] = useState<string[]>([]);
   const [mode, setMode] = useState<'text' | 'pdf'>('text');
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [pagesPerBatch] = useState<number>(5);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const voices = [
+  const voices: Voice[] = [
     { id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel', type: 'Féminine - Naturelle' },
     { id: 'AZnzlk1XvdvUeBnXmlld', name: 'Domi', type: 'Féminine - Confiante' },
     { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Bella', type: 'Féminine - Douce' },
@@ -29,28 +48,6 @@ export default function EchoTTS() {
     { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', type: 'Masculine - Profonde' },
     { id: 'yoZ06aMxZJJ28mfd3POQ', name: 'Sam', type: 'Masculine - Dynamique' },
   ];
-
-  // Diviser le texte en chunks de ~5000 caractères pour ElevenLabs
-  const splitIntoChunks = (text: string, maxLength: number = 5000) => {
-    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
-    const chunks: string[] = [];
-    let currentChunk = '';
-
-    sentences.forEach(sentence => {
-      if ((currentChunk + sentence).length > maxLength && currentChunk.length > 0) {
-        chunks.push(currentChunk.trim());
-        currentChunk = sentence;
-      } else {
-        currentChunk += sentence;
-      }
-    });
-
-    if (currentChunk.trim()) {
-      chunks.push(currentChunk.trim());
-    }
-
-    return chunks;
-  };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -66,8 +63,10 @@ export default function EchoTTS() {
     try {
       const formData = new FormData();
       formData.append('pdf', file);
+      formData.append('startPage', '1');
+      formData.append('pageCount', pagesPerBatch.toString());
 
-      const response = await fetch('/api/extract-pdf', {
+      const response = await fetch(`${API_BASE_URL}/extract-pdf`, {
         method: 'POST',
         body: formData,
       });
@@ -77,15 +76,19 @@ export default function EchoTTS() {
       }
 
       const data = await response.json();
-      const extractedText = data.text;
       
-      setPdfText(extractedText);
-      setText(extractedText);
+      setBookData({
+        bookId: data.bookId,
+        readingId: data.readingId,
+        totalPages: data.totalPages,
+        currentPage: data.currentPage,
+        endPage: data.endPage,
+        hasMore: data.hasMore,
+        progress: data.progress
+      });
       
-      // Diviser en chunks
-      const textChunks = splitIntoChunks(extractedText);
-      setChunks(textChunks);
-      setCurrentChunk(0);
+      setText(data.text);
+      setCurrentPageStart(data.currentPage);
       setMode('pdf');
       
     } catch (err) {
@@ -96,12 +99,116 @@ export default function EchoTTS() {
     }
   };
 
-  const handleGenerate = async (chunkIndex?: number) => {
-    const textToGenerate = mode === 'pdf' && chunks.length > 0 
-      ? chunks[chunkIndex ?? currentChunk] 
-      : text;
+  const loadNextBatch = async () => {
+    if (!pdfFile || !bookData) return;
 
-    if (!textToGenerate.trim()) {
+    setIsExtracting(true);
+    setError(null);
+
+    try {
+      const nextPageStart = bookData.endPage + 1;
+      
+      const formData = new FormData();
+      formData.append('pdf', pdfFile);
+      formData.append('startPage', nextPageStart.toString());
+      formData.append('pageCount', pagesPerBatch.toString());
+
+      const response = await fetch(`${API_BASE_URL}/extract-pdf`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error('Erreur lors de l\'extraction');
+      }
+
+      const data = await response.json();
+      
+      setBookData(prev => prev ? ({
+        ...prev,
+        currentPage: data.currentPage,
+        endPage: data.endPage,
+        hasMore: data.hasMore,
+        progress: data.progress
+      }) : null);
+      
+      setText(data.text);
+      setCurrentPageStart(data.currentPage);
+      
+      await updateProgress(data.currentPage, data.endPage);
+      
+    } catch (err) {
+      console.error('Erreur:', err);
+      setError('Impossible de charger les pages suivantes');
+    } finally {
+      setIsExtracting(false);
+    }
+  };
+
+  const loadPreviousBatch = async () => {
+    if (!pdfFile || !bookData || currentPageStart <= 1) return;
+
+    setIsExtracting(true);
+    setError(null);
+
+    try {
+      const prevPageStart = Math.max(1, currentPageStart - pagesPerBatch);
+      
+      const formData = new FormData();
+      formData.append('pdf', pdfFile);
+      formData.append('startPage', prevPageStart.toString());
+      formData.append('pageCount', pagesPerBatch.toString());
+
+      const response = await fetch(`${API_BASE_URL}/extract-pdf`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error('Erreur lors de l\'extraction');
+      }
+
+      const data = await response.json();
+      
+      setBookData(prev => prev ? ({
+        ...prev,
+        currentPage: data.currentPage,
+        endPage: data.endPage,
+        hasMore: data.hasMore,
+        progress: data.progress
+      }) : null);
+      
+      setText(data.text);
+      setCurrentPageStart(data.currentPage);
+      
+    } catch (err) {
+      console.error('Erreur:', err);
+      setError('Impossible de charger les pages précédentes');
+    } finally {
+      setIsExtracting(false);
+    }
+  };
+
+  const updateProgress = async (currentPage: number, lastReadPage: number) => {
+    if (!bookData) return;
+
+    try {
+      await fetch(`${API_BASE_URL}/update-progress`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          readingId: bookData.readingId,
+          currentPage,
+          lastReadPage
+        })
+      });
+    } catch (err) {
+      console.error('Erreur mise à jour progression:', err);
+    }
+  };
+
+  const handleGenerate = async () => {
+    if (!text.trim()) {
       setError('Veuillez entrer du texte ou uploader un PDF');
       return;
     }
@@ -110,13 +217,11 @@ export default function EchoTTS() {
     setError(null);
     
     try {
-      const response = await fetch('/api/generate-speech', {
+      const response = await fetch(`${API_BASE_URL}/generate-speech`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: textToGenerate,
+          text: text,
           voiceId: selectedVoice,
           modelId: 'eleven_multilingual_v2',
         }),
@@ -150,20 +255,6 @@ export default function EchoTTS() {
     }
   };
 
-  const handleNextChunk = () => {
-    if (currentChunk < chunks.length - 1) {
-      setCurrentChunk(currentChunk + 1);
-      handleGenerate(currentChunk + 1);
-    }
-  };
-
-  const handlePreviousChunk = () => {
-    if (currentChunk > 0) {
-      setCurrentChunk(currentChunk - 1);
-      handleGenerate(currentChunk - 1);
-    }
-  };
-
   const togglePlayPause = () => {
     if (audioRef.current) {
       if (isPlaying) {
@@ -188,14 +279,20 @@ export default function EchoTTS() {
 
   const clearPdf = () => {
     setPdfFile(null);
-    setPdfText('');
-    setChunks([]);
-    setCurrentChunk(0);
+    setBookData(null);
+    setCurrentPageStart(1);
     setMode('text');
     setText('');
     if (audioUrl) {
       URL.revokeObjectURL(audioUrl);
       setAudioUrl(null);
+    }
+  };
+
+  const handleAudioEnded = () => {
+    setIsPlaying(false);
+    if (mode === 'pdf' && bookData?.hasMore) {
+      setTimeout(() => loadNextBatch(), 1000);
     }
   };
 
@@ -212,14 +309,6 @@ export default function EchoTTS() {
       }
     };
   }, [audioUrl]);
-
-  // Auto-play next chunk when current ends
-  const handleAudioEnded = () => {
-    setIsPlaying(false);
-    if (mode === 'pdf' && currentChunk < chunks.length - 1) {
-      setTimeout(() => handleNextChunk(), 1000);
-    }
-  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white">
@@ -264,7 +353,6 @@ export default function EchoTTS() {
               </div>
             )}
 
-            {/* Mode Selector */}
             <div className="flex gap-4">
               <button
                 onClick={() => setMode('text')}
@@ -291,19 +379,17 @@ export default function EchoTTS() {
               </button>
             </div>
 
-            {/* PDF Info */}
-            {pdfFile && (
+            {pdfFile && bookData && (
               <div className="bg-gradient-to-r from-violet-600/10 to-purple-600/10 border border-violet-500/30 rounded-xl p-4">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 rounded-lg bg-violet-600/20 flex items-center justify-center">
-                      <BookOpen className="w-5 h-5 text-violet-400" />
+                      <BookMarked className="w-5 h-5 text-violet-400" />
                     </div>
                     <div>
                       <div className="font-medium">{pdfFile.name}</div>
                       <div className="text-xs text-slate-400">
-                        {chunks.length > 0 && `${chunks.length} segments • `}
-                        {pdfText.length.toLocaleString()} caractères
+                        Pages {bookData.currentPage}-{bookData.endPage} sur {bookData.totalPages}
                       </div>
                     </div>
                   </div>
@@ -315,66 +401,62 @@ export default function EchoTTS() {
                   </button>
                 </div>
 
-                {chunks.length > 0 && (
-                  <div className="mt-4 pt-4 border-t border-violet-500/20">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm text-slate-400">
-                        Segment {currentChunk + 1} / {chunks.length}
-                      </span>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={handlePreviousChunk}
-                          disabled={currentChunk === 0 || isGenerating}
-                          className="p-1.5 rounded-lg bg-slate-800/50 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                        >
-                          <SkipBack className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={handleNextChunk}
-                          disabled={currentChunk === chunks.length - 1 || isGenerating}
-                          className="p-1.5 rounded-lg bg-slate-800/50 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                        >
-                          <SkipForward className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                    <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                      <div 
-                        className="h-full bg-gradient-to-r from-violet-600 to-purple-600 transition-all duration-300"
-                        style={{ width: `${((currentChunk + 1) / chunks.length) * 100}%` }}
-                      />
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-slate-400">
+                      Progression: {bookData.progress}%
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={loadPreviousBatch}
+                        disabled={currentPageStart <= 1 || isExtracting}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800/50 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-2 text-sm"
+                      >
+                        <SkipBack className="w-4 h-4" />
+                        {pagesPerBatch} pages précédentes
+                      </button>
+                      <button
+                        onClick={loadNextBatch}
+                        disabled={!bookData.hasMore || isExtracting}
+                        className="px-3 py-1.5 rounded-lg bg-violet-600/30 hover:bg-violet-600/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-2 text-sm"
+                      >
+                        {pagesPerBatch} pages suivantes
+                        <SkipForward className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
-                )}
+                  <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-gradient-to-r from-violet-600 to-purple-600 transition-all duration-300"
+                      style={{ width: `${bookData.progress}%` }}
+                    />
+                  </div>
+                </div>
               </div>
             )}
 
-            {/* Text Input */}
             <div className="bg-slate-900/50 backdrop-blur-sm rounded-2xl border border-slate-800/50 overflow-hidden">
               <div className="p-4 border-b border-slate-800/50 flex items-center justify-between">
                 <h2 className="font-semibold flex items-center gap-2">
                   {isExtracting ? (
                     <>
                       <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
-                      Extraction du PDF...
+                      Extraction en cours...
                     </>
                   ) : (
                     <>
                       <Sparkles className="w-4 h-4 text-violet-400" />
-                      {mode === 'pdf' && chunks.length > 0 ? `Segment ${currentChunk + 1}` : 'Texte à synthétiser'}
+                      {mode === 'pdf' && bookData ? `Pages ${bookData.currentPage}-${bookData.endPage}` : 'Texte à synthétiser'}
                     </>
                   )}
                 </h2>
                 <span className="text-xs text-slate-400">
-                  {mode === 'pdf' && chunks.length > 0 
-                    ? `${chunks[currentChunk].length} caractères`
-                    : `${text.length} caractères`
-                  }
+                  {text.length.toLocaleString()} caractères
                 </span>
               </div>
               
               <textarea
-                value={mode === 'pdf' && chunks.length > 0 ? chunks[currentChunk] : text}
+                value={text}
                 onChange={(e) => mode === 'text' && setText(e.target.value)}
                 placeholder="Entrez votre texte ici ou importez un PDF pour le lire..."
                 className="w-full h-64 p-6 bg-transparent resize-none focus:outline-none text-slate-200 placeholder:text-slate-600"
@@ -384,8 +466,8 @@ export default function EchoTTS() {
               <div className="p-4 border-t border-slate-800/50 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <button
-                    onClick={() => handleGenerate()}
-                    disabled={(!text.trim() && chunks.length === 0) || isGenerating || isExtracting}
+                    onClick={handleGenerate}
+                    disabled={!text.trim() || isGenerating || isExtracting}
                     className="px-6 py-2.5 bg-gradient-to-r from-violet-600 to-purple-600 rounded-lg font-medium hover:from-violet-500 hover:to-purple-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-2"
                   >
                     {isGenerating ? (
@@ -396,7 +478,7 @@ export default function EchoTTS() {
                     ) : (
                       <>
                         <Play className="w-4 h-4" />
-                        {mode === 'pdf' && chunks.length > 0 ? 'Lire ce segment' : 'Générer'}
+                        Lire ces pages
                       </>
                     )}
                   </button>
@@ -419,19 +501,9 @@ export default function EchoTTS() {
                     </>
                   )}
                 </div>
-
-                <div className="text-xs text-slate-400">
-                  {isGenerating && (
-                    <span className="flex items-center gap-2">
-                      <div className="w-2 h-2 bg-violet-500 rounded-full animate-pulse" />
-                      Traitement en cours...
-                    </span>
-                  )}
-                </div>
               </div>
             </div>
 
-            {/* Waveform Visualization */}
             {audioUrl && (
               <div className="bg-slate-900/50 backdrop-blur-sm rounded-2xl border border-slate-800/50 p-6">
                 <div className="flex items-center gap-4 mb-4">
@@ -463,9 +535,7 @@ export default function EchoTTS() {
             )}
           </div>
 
-          {/* Sidebar */}
           <div className="space-y-6">
-            {/* Voice Selection */}
             <div className="bg-slate-900/50 backdrop-blur-sm rounded-2xl border border-slate-800/50 p-6">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
                 <Mic className="w-4 h-4 text-violet-400" />
@@ -490,7 +560,6 @@ export default function EchoTTS() {
               </div>
             </div>
 
-            {/* Settings */}
             {showSettings && (
               <div className="bg-slate-900/50 backdrop-blur-sm rounded-2xl border border-slate-800/50 p-6">
                 <h3 className="font-semibold mb-4">Paramètres</h3>
@@ -514,16 +583,16 @@ export default function EchoTTS() {
                   <div className="pt-4 border-t border-slate-800/50">
                     <div className="text-xs text-slate-500 space-y-1">
                       <div className="flex justify-between">
-                        <span>Modèle:</span>
-                        <span className="text-slate-400">Eleven Multilingual v2</span>
+                        <span>Backend:</span>
+                        <span className="text-green-400">Express + MongoDB</span>
                       </div>
                       <div className="flex justify-between">
-                        <span>Provider:</span>
-                        <span className="text-violet-400">ElevenLabs</span>
+                        <span>API:</span>
+                        <span className="text-slate-400">{API_BASE_URL}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span>Auto-play:</span>
-                        <span className="text-green-400">Activé</span>
+                        <span>Pages par lot:</span>
+                        <span className="text-green-400">{pagesPerBatch}</span>
                       </div>
                     </div>
                   </div>
@@ -531,7 +600,6 @@ export default function EchoTTS() {
               </div>
             )}
 
-            {/* Info */}
             <div className="bg-slate-900/50 backdrop-blur-sm rounded-2xl border border-slate-800/50 p-6">
               <h3 className="font-semibold mb-4 text-sm text-slate-400">Guide</h3>
               
@@ -540,28 +608,53 @@ export default function EchoTTS() {
                   <div className="w-5 h-5 rounded bg-violet-600/20 flex items-center justify-center flex-shrink-0 mt-0.5">
                     <span className="text-violet-400">1</span>
                   </div>
-                  <p>Importez un PDF ou saisissez du texte</p>
+                  <p>Importez un PDF - seules les premières {pagesPerBatch} pages seront extraites</p>
                 </div>
                 <div className="flex gap-2">
                   <div className="w-5 h-5 rounded bg-violet-600/20 flex items-center justify-center flex-shrink-0 mt-0.5">
                     <span className="text-violet-400">2</span>
                   </div>
-                  <p>Choisissez une voix</p>
+                  <p>Choisissez une voix et générez l&apos;audio</p>
                 </div>
                 <div className="flex gap-2">
                   <div className="w-5 h-5 rounded bg-violet-600/20 flex items-center justify-center flex-shrink-0 mt-0.5">
                     <span className="text-violet-400">3</span>
                   </div>
-                  <p>Cliquez sur Générer - la lecture démarre automatiquement</p>
-                </div>
-                <div className="flex gap-2">
-                  <div className="w-5 h-5 rounded bg-violet-600/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <span className="text-violet-400">4</span>
-                  </div>
-                  <p>Pour les PDFs : les segments vont automatiquement</p>
+                  <p>Naviguez entre les lots avec les boutons de pagination</p>
                 </div>
               </div>
             </div>
+
+            {bookData && (
+              <div className="bg-gradient-to-br from-violet-600/10 to-purple-600/10 border border-violet-500/30 rounded-2xl p-6">
+                <h3 className="font-semibold mb-4 text-sm">Statistiques</h3>
+                
+                <div className="space-y-3 text-sm">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Pages lues</span>
+                    <span className="font-bold text-violet-400">{bookData.endPage} / {bookData.totalPages}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Progression</span>
+                    <span className="font-bold text-purple-400">{bookData.progress}%</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Lot actuel</span>
+                    <span className="font-bold text-slate-300">
+                      {Math.ceil(bookData.endPage / pagesPerBatch)} / {Math.ceil(bookData.totalPages / pagesPerBatch)}
+                    </span>
+                  </div>
+                  {bookData.hasMore && (
+                    <div className="pt-3 border-t border-violet-500/20">
+                      <div className="text-xs text-slate-400 flex items-center gap-2">
+                        <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                        {bookData.totalPages - bookData.endPage} pages restantes
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
