@@ -37,8 +37,25 @@ router.post('/', async (req, res) => {
     );
 
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`ElevenLabs API error: ${response.status} - ${errorText}`);
+      const errorData = await response.json();
+      
+      // Gestion spécifique de l'erreur de quota
+      if (errorData.detail?.status === 'quota_exceeded') {
+        return res.status(402).json({
+          error: 'quota_exceeded',
+          message: 'Quota de caractères ElevenLabs dépassé',
+          details: errorData.detail.message,
+          remainingCredits: extractCreditsFromMessage(errorData.detail.message, 'remaining'),
+          requiredCredits: extractCreditsFromMessage(errorData.detail.message, 'required'),
+        });
+      }
+      
+      // Autres erreurs API
+      return res.status(response.status).json({
+        error: 'api_error',
+        message: errorData.detail?.message || 'Erreur API ElevenLabs',
+        details: errorData,
+      });
     }
 
     const audioBuffer = await response.arrayBuffer();
@@ -53,10 +70,23 @@ router.post('/', async (req, res) => {
   } catch (error) {
     console.error('Error generating speech:', error);
     res.status(500).json({
-      error: 'Failed to generate speech',
+      error: 'internal_error',
+      message: 'Erreur lors de la génération audio',
       details: error.message,
     });
   }
 });
+
+// Fonction helper pour extraire les crédits du message d'erreur
+function extractCreditsFromMessage(message, type) {
+  if (type === 'remaining') {
+    const match = message.match(/You have (\d+) credits remaining/);
+    return match ? parseInt(match[1]) : null;
+  } else if (type === 'required') {
+    const match = message.match(/(\d+) credits are required/);
+    return match ? parseInt(match[1]) : null;
+  }
+  return null;
+}
 
 module.exports = router;

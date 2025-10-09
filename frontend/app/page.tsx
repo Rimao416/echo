@@ -1,8 +1,7 @@
 "use client"
 import React, { useState, useRef, useEffect } from 'react';
-import { Mic, Play, Pause, Download, Loader2, Volume2, Settings, Sparkles, Trash2, FileText, SkipForward, SkipBack, BookMarked } from 'lucide-react';
+import { Mic, Play, Pause, Download, Loader2, Volume2, Settings, Sparkles, Trash2, FileText, SkipForward, SkipBack, BookMarked, AlertCircle, Info, X } from 'lucide-react';
 
-// Configuration de l'API Backend
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 interface BookData {
@@ -21,6 +20,21 @@ interface Voice {
   type: string;
 }
 
+interface QuotaInfo {
+  characterCount: number;
+  characterLimit: number;
+  remainingCharacters: number;
+  tier: string;
+}
+
+interface ErrorInfo {
+  type: 'error' | 'warning' | 'info';
+  message: string;
+  details?: string;
+  remainingCredits?: number;
+  requiredCredits?: number;
+}
+
 export default function EchoTTS() {
   const [text, setText] = useState<string>('');
   const [pdfFile, setPdfFile] = useState<File | null>(null);
@@ -33,9 +47,11 @@ export default function EchoTTS() {
   const [selectedVoice, setSelectedVoice] = useState<string>('21m00Tcm4TlvDq8ikWAM');
   const [speed, setSpeed] = useState<number>(1.0);
   const [showSettings, setShowSettings] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
+  const [errorInfo, setErrorInfo] = useState<ErrorInfo | null>(null);
   const [mode, setMode] = useState<'text' | 'pdf'>('text');
   const [pagesPerBatch] = useState<number>(5);
+  const [quotaInfo, setQuotaInfo] = useState<QuotaInfo | null>(null);
+  const [isLoadingQuota, setIsLoadingQuota] = useState<boolean>(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -49,16 +65,45 @@ export default function EchoTTS() {
     { id: 'yoZ06aMxZJJ28mfd3POQ', name: 'Sam', type: 'Masculine - Dynamique' },
   ];
 
+  const fetchQuota = async () => {
+    setIsLoadingQuota(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/user-quota`);
+      if (response.ok) {
+        const data = await response.json();
+        setQuotaInfo(data);
+      }
+    } catch (err) {
+      console.error('Erreur récupération quota:', err);
+    } finally {
+      setIsLoadingQuota(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchQuota();
+  }, []);
+
+  const showError = (type: 'error' | 'warning' | 'info', message: string, details?: any) => {
+    setErrorInfo({
+      type,
+      message,
+      details: details?.details || details,
+      remainingCredits: details?.remainingCredits,
+      requiredCredits: details?.requiredCredits,
+    });
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || file.type !== 'application/pdf') {
-      setError('Veuillez sélectionner un fichier PDF valide');
+      showError('error', 'Veuillez sélectionner un fichier PDF valide');
       return;
     }
 
     setPdfFile(file);
     setIsExtracting(true);
-    setError(null);
+    setErrorInfo(null);
 
     try {
       const formData = new FormData();
@@ -91,9 +136,8 @@ export default function EchoTTS() {
       setCurrentPageStart(data.currentPage);
       setMode('pdf');
       
-    } catch (err) {
-      console.error('Erreur:', err);
-      setError('Impossible d\'extraire le texte du PDF');
+    } catch (err: any) {
+      showError('error', 'Impossible d\'extraire le texte du PDF', err.message);
     } finally {
       setIsExtracting(false);
     }
@@ -103,7 +147,7 @@ export default function EchoTTS() {
     if (!pdfFile || !bookData) return;
 
     setIsExtracting(true);
-    setError(null);
+    setErrorInfo(null);
 
     try {
       const nextPageStart = bookData.endPage + 1;
@@ -137,9 +181,8 @@ export default function EchoTTS() {
       
       await updateProgress(data.currentPage, data.endPage);
       
-    } catch (err) {
-      console.error('Erreur:', err);
-      setError('Impossible de charger les pages suivantes');
+    } catch (err: any) {
+      showError('error', 'Impossible de charger les pages suivantes', err.message);
     } finally {
       setIsExtracting(false);
     }
@@ -149,7 +192,7 @@ export default function EchoTTS() {
     if (!pdfFile || !bookData || currentPageStart <= 1) return;
 
     setIsExtracting(true);
-    setError(null);
+    setErrorInfo(null);
 
     try {
       const prevPageStart = Math.max(1, currentPageStart - pagesPerBatch);
@@ -181,9 +224,8 @@ export default function EchoTTS() {
       setText(data.text);
       setCurrentPageStart(data.currentPage);
       
-    } catch (err) {
-      console.error('Erreur:', err);
-      setError('Impossible de charger les pages précédentes');
+    } catch (err: any) {
+      showError('error', 'Impossible de charger les pages précédentes', err.message);
     } finally {
       setIsExtracting(false);
     }
@@ -209,12 +251,12 @@ export default function EchoTTS() {
 
   const handleGenerate = async () => {
     if (!text.trim()) {
-      setError('Veuillez entrer du texte ou uploader un PDF');
+      showError('warning', 'Veuillez entrer du texte ou uploader un PDF');
       return;
     }
     
     setIsGenerating(true);
-    setError(null);
+    setErrorInfo(null);
     
     try {
       const response = await fetch(`${API_BASE_URL}/generate-speech`, {
@@ -228,7 +270,15 @@ export default function EchoTTS() {
       });
 
       if (!response.ok) {
-        throw new Error('Erreur lors de la génération audio');
+        const errorData = await response.json();
+        
+        if (errorData.error === 'quota_exceeded') {
+          showError('error', errorData.message, errorData);
+          await fetchQuota();
+          return;
+        }
+        
+        throw new Error(errorData.message || 'Erreur lors de la génération');
       }
 
       const audioBlob = await response.blob();
@@ -239,6 +289,7 @@ export default function EchoTTS() {
       }
       
       setAudioUrl(url);
+      await fetchQuota();
       
       setTimeout(() => {
         if (audioRef.current) {
@@ -247,9 +298,8 @@ export default function EchoTTS() {
         }
       }, 100);
       
-    } catch (err) {
-      console.error('Erreur:', err);
-      setError('Impossible de générer l\'audio. Vérifiez votre clé API.');
+    } catch (err: any) {
+      showError('error', 'Impossible de générer l\'audio', err.message);
     } finally {
       setIsGenerating(false);
     }
@@ -310,6 +360,24 @@ export default function EchoTTS() {
     };
   }, [audioUrl]);
 
+  const getErrorIcon = (type: string) => {
+    switch (type) {
+      case 'error': return <AlertCircle className="w-5 h-5" />;
+      case 'warning': return <AlertCircle className="w-5 h-5" />;
+      case 'info': return <Info className="w-5 h-5" />;
+      default: return <AlertCircle className="w-5 h-5" />;
+    }
+  };
+
+  const getErrorColor = (type: string) => {
+    switch (type) {
+      case 'error': return 'bg-red-500/10 border-red-500/50 text-red-400';
+      case 'warning': return 'bg-yellow-500/10 border-yellow-500/50 text-yellow-400';
+      case 'info': return 'bg-blue-500/10 border-blue-500/50 text-blue-400';
+      default: return 'bg-red-500/10 border-red-500/50 text-red-400';
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white">
       <input
@@ -332,23 +400,50 @@ export default function EchoTTS() {
             </div>
           </div>
           
-          <button
-            onClick={() => setShowSettings(!showSettings)}
-            className="p-2 rounded-lg hover:bg-slate-800/50 transition-colors"
-          >
-            <Settings className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-3">
+            {quotaInfo && (
+              <div className="hidden sm:flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-800/50 border border-slate-700">
+                <Sparkles className="w-4 h-4 text-violet-400" />
+                <div className="text-xs">
+                  <div className="text-slate-400">Crédits restants</div>
+                  <div className="font-bold text-violet-400">
+                    {quotaInfo.remainingCharacters.toLocaleString()} / {quotaInfo.characterLimit.toLocaleString()}
+                  </div>
+                </div>
+              </div>
+            )}
+            <button
+              onClick={() => setShowSettings(!showSettings)}
+              className="p-2 rounded-lg hover:bg-slate-800/50 transition-colors"
+            >
+              <Settings className="w-5 h-5" />
+            </button>
+          </div>
         </div>
       </header>
 
       <div className="max-w-7xl mx-auto px-6 py-12">
         <div className="grid lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-6">
-            {error && (
-              <div className="bg-red-500/10 border border-red-500/50 rounded-xl p-4 text-red-400 flex items-center justify-between">
-                <span>{error}</span>
-                <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
-                  <Trash2 className="w-4 h-4" />
+            {errorInfo && (
+              <div className={`${getErrorColor(errorInfo.type)} border rounded-xl p-4 flex items-start justify-between`}>
+                <div className="flex gap-3">
+                  {getErrorIcon(errorInfo.type)}
+                  <div className="flex-1">
+                    <div className="font-medium mb-1">{errorInfo.message}</div>
+                    {errorInfo.details && (
+                      <div className="text-xs opacity-75 mt-1">{errorInfo.details}</div>
+                    )}
+                    {errorInfo.remainingCredits !== undefined && (
+                      <div className="mt-2 text-xs">
+                        <div>Crédits restants: {errorInfo.remainingCredits.toLocaleString()}</div>
+                        <div>Crédits requis: {errorInfo.requiredCredits?.toLocaleString()}</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <button onClick={() => setErrorInfo(null)} className="hover:opacity-70 transition-opacity">
+                  <X className="w-4 h-4" />
                 </button>
               </div>
             )}
@@ -413,14 +508,14 @@ export default function EchoTTS() {
                         className="px-3 py-1.5 rounded-lg bg-slate-800/50 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-2 text-sm"
                       >
                         <SkipBack className="w-4 h-4" />
-                        {pagesPerBatch} pages précédentes
+                        Précédent
                       </button>
                       <button
                         onClick={loadNextBatch}
                         disabled={!bookData.hasMore || isExtracting}
                         className="px-3 py-1.5 rounded-lg bg-violet-600/30 hover:bg-violet-600/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-2 text-sm"
                       >
-                        {pagesPerBatch} pages suivantes
+                        Suivant
                         <SkipForward className="w-4 h-4" />
                       </button>
                     </div>

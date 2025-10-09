@@ -6,6 +6,7 @@ const fileUpload = require('express-fileupload');
 const extractPdfRoute = require('./routes/extract-pdf');
 const generateSpeechRoute = require('./routes/generate-speech');
 const updateProgressRoute = require('./routes/update-progress');
+const userQuotaRoute = require('./routes/user-quota');
 
 dotenv.config();
 
@@ -38,6 +39,7 @@ mongoose
 
 // Routes
 app.use('/api/extract-pdf', extractPdfRoute);
+app.use("/api/user-quota", userQuotaRoute);
 app.use('/api/generate-speech', generateSpeechRoute);
 app.use('/api/update-progress', updateProgressRoute);
 
