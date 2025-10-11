@@ -4,7 +4,7 @@ import { Volume2 } from 'lucide-react';
 
 interface AudioVisualizerProps {
   isPlaying: boolean;
-  audioRef: React.RefObject<HTMLAudioElement>;
+  audioRef: React.RefObject<HTMLAudioElement | null>; // Ajoute | null
   audioUrl: string;
   onEnded: () => void;
 }

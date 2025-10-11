@@ -10,6 +10,7 @@ import { VoiceSelector } from '@/components/VoiceSelector';
 import { SettingsPanel } from '@/components/SettingsPanel';
 import { Guide } from '@/components/Guide';
 import { Statistics } from '@/components/Statistics';
+import { AudioVisualizer } from '@/components/AudioVisualizer';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -380,6 +381,14 @@ export default function EchoTTS() {
               onTogglePlayPause={togglePlayPause}
               onDownload={handleDownload}
             />
+            {audioUrl && (
+  <AudioVisualizer
+    isPlaying={isPlaying}
+    audioRef={audioRef}
+    audioUrl={audioUrl}
+    onEnded={handleAudioEnded}
+  />
+)}
 
            
           </div>
