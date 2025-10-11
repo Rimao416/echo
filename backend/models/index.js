@@ -14,6 +14,10 @@ const bookSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    totalCharacters: {
+      type: Number,
+      required: true,
+    },
     fileHash: {
       type: String,
       required: true,
@@ -34,15 +38,11 @@ const readingSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-    currentPage: {
-      type: Number,
-      default: 1,
-    },
-    lastReadPage: {
+    currentOffset: {
       type: Number,
       default: 0,
     },
-    totalPagesRead: {
+    lastReadOffset: {
       type: Number,
       default: 0,
     },
@@ -61,29 +61,19 @@ const readingSchema = new mongoose.Schema(
   }
 );
 
-const pageCacheSchema = new mongoose.Schema(
+// Nouveau schéma pour stocker le texte complet
+const textCacheSchema = new mongoose.Schema(
   {
     bookId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Book',
       required: true,
+      unique: true,
       index: true,
     },
-    pageStart: {
-      type: Number,
-      required: true,
-    },
-    pageEnd: {
-      type: Number,
-      required: true,
-    },
-    extractedText: {
+    fullText: {
       type: String,
       required: true,
-    },
-    audioUrl: {
-      type: String,
-      default: null,
     },
   },
   {
@@ -91,11 +81,8 @@ const pageCacheSchema = new mongoose.Schema(
   }
 );
 
-// Index composé pour la recherche unique des pages en cache
-pageCacheSchema.index({ bookId: 1, pageStart: 1, pageEnd: 1 }, { unique: true });
-
 const Book = mongoose.model('Book', bookSchema);
 const Reading = mongoose.model('Reading', readingSchema);
-const PageCache = mongoose.model('PageCache', pageCacheSchema);
+const TextCache = mongoose.model('TextCache', textCacheSchema);
 
-module.exports = { Book, Reading, PageCache };
+module.exports = { Book, Reading, TextCache };

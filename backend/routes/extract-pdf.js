@@ -3,9 +3,11 @@ const crypto = require('crypto');
 const { readFile, writeFile, unlink } = require('fs/promises');
 const { PDFDocument } = require('pdf-lib');
 const pdf = require('pdf-parse');
-const { Book, Reading, PageCache } = require('../models');
+const { Book, Reading, TextCache } = require('../models');
 
 const router = express.Router();
+
+const MIN_CHARS = 500; // Minimum de caractères à extraire
 
 /**
  * Nettoyage léger du texte extrait
@@ -18,9 +20,50 @@ function cleanExtractedText(text) {
     .trim();
 }
 
+/**
+ * Extrait MIN_CHARS caractères + jusqu'au prochain point
+ */
+function extractChunk(fullText, startOffset) {
+  if (!fullText || startOffset >= fullText.length) {
+    return { text: '', endOffset: fullText?.length || 0, hasMore: false };
+  }
+
+  let endOffset = startOffset + MIN_CHARS;
+  
+  // Si on dépasse la fin du texte
+  if (endOffset >= fullText.length) {
+    return {
+      text: fullText.substring(startOffset).trim(),
+      endOffset: fullText.length,
+      hasMore: false
+    };
+  }
+
+  // Chercher le prochain point après MIN_CHARS
+  const searchText = fullText.substring(endOffset);
+  const sentenceEnd = searchText.search(/[.!?]["""')]*(\s|$)/);
+
+  if (sentenceEnd !== -1) {
+    // Inclure le point et les espaces/guillemets qui suivent
+    endOffset += sentenceEnd + 1;
+    // Avancer jusqu'au prochain caractère non-espace
+    while (endOffset < fullText.length && /\s/.test(fullText[endOffset])) {
+      endOffset++;
+    }
+  } else {
+    // Pas de point trouvé, prendre jusqu'à la fin
+    endOffset = fullText.length;
+  }
+
+  return {
+    text: fullText.substring(startOffset, endOffset).trim(),
+    endOffset: endOffset,
+    hasMore: endOffset < fullText.length
+  };
+}
+
 router.post('/', async (req, res) => {
   let tempFilePath = null;
-  let tempPartialPath = null;
 
   try {
     if (!req.files || !req.files.pdf) {
@@ -28,74 +71,56 @@ router.post('/', async (req, res) => {
     }
 
     const pdfFile = req.files.pdf;
-    const startPage = parseInt(req.body.startPage) || 1;
-    const pageCount = parseInt(req.body.pageCount) || 5;
+    const requestedOffset = parseInt(req.body.offset) || 0;
 
-    // Fichier temporaire initial
     tempFilePath = pdfFile.tempFilePath;
-
-    // Lire le buffer du PDF
     const fileBuffer = await readFile(tempFilePath);
     const fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
 
-    // Vérifier si le livre existe déjà
+    // Vérifier si le livre existe
     let book = await Book.findOne({ fileHash });
-    let totalPages;
+    let fullText;
 
-    // On récupère le totalPages une seule fois (si pas déjà connu)
     if (!book) {
+      // Nouveau livre : extraire tout le texte
       const fullDoc = await PDFDocument.load(fileBuffer);
-      totalPages = fullDoc.getPageCount();
+      const totalPages = fullDoc.getPageCount();
+      
+      // Extraire tout le PDF
+      const extracted = await pdf(fileBuffer);
+      fullText = cleanExtractedText(extracted.text);
+      
+      const totalChars = fullText.length;
 
       book = await Book.create({
         title: pdfFile.name.replace('.pdf', ''),
         filename: pdfFile.name,
         totalPages,
+        totalCharacters: totalChars,
         fileHash,
       });
+
+      // Stocker le texte complet dans le cache
+      await TextCache.create({
+        bookId: book._id,
+        fullText: fullText,
+      });
     } else {
-      totalPages = book.totalPages;
+      // Livre existant : récupérer le texte du cache
+      const cached = await TextCache.findOne({ bookId: book._id });
+      if (!cached) {
+        return res.status(500).json({ error: 'Text cache not found' });
+      }
+      fullText = cached.fullText;
     }
 
-    // Gérer la plage de pages
-    const endPage = Math.min(startPage + pageCount - 1, totalPages);
+    // Extraire le chunk demandé
+    const { text, endOffset, hasMore } = extractChunk(fullText, requestedOffset);
 
-    // Vérifier si déjà en cache
-    let cachedPage = await PageCache.findOne({
-      bookId: book._id,
-      pageStart: startPage,
-      pageEnd: endPage,
-    });
-
-    let extractedText = '';
-
-    if (cachedPage) {
-      extractedText = cachedPage.extractedText;
-    } else {
-      // Extraire uniquement les pages demandées avec pdf-lib
-      const fullPdf = await PDFDocument.load(fileBuffer);
-      const newPdf = await PDFDocument.create();
-
-      for (let i = startPage - 1; i < endPage; i++) {
-        const [page] = await newPdf.copyPages(fullPdf, [i]);
-        newPdf.addPage(page);
-      }
-
-      const partialPdfBytes = await newPdf.save();
-      tempPartialPath = `${tempFilePath}_part.pdf`;
-      await writeFile(tempPartialPath, partialPdfBytes);
-
-      // Lire uniquement les pages extraites
-      const extracted = await pdf(partialPdfBytes);
-      extractedText = cleanExtractedText(extracted.text);
-      extractedText = `--- Pages ${startPage}-${endPage} ---\n\n${extractedText}`;
-
-      // Sauvegarde dans le cache
-      await PageCache.create({
-        bookId: book._id,
-        pageStart: startPage,
-        pageEnd: endPage,
-        extractedText,
+    if (!text) {
+      return res.status(400).json({ 
+        error: 'No more text to extract',
+        message: 'Vous avez atteint la fin du document'
       });
     }
 
@@ -108,32 +133,41 @@ router.post('/', async (req, res) => {
     if (!reading) {
       reading = await Reading.create({
         bookId: book._id,
-        currentPage: 1,
+        currentOffset: 0,
       });
     }
 
-    // Nettoyer les fichiers temporaires
-    await Promise.all([
-      tempFilePath && unlink(tempFilePath).catch(() => {}),
-      tempPartialPath && unlink(tempPartialPath).catch(() => {}),
-    ]);
+    // Mettre à jour la progression
+    await Reading.findByIdAndUpdate(reading._id, {
+      currentOffset: requestedOffset,
+      lastReadOffset: endOffset,
+      lastReadAt: new Date(),
+      isCompleted: !hasMore,
+    });
+
+    // Nettoyer le fichier temporaire
+    if (tempFilePath) {
+      await unlink(tempFilePath).catch(() => {});
+    }
+
+    const progress = Math.round((endOffset / book.totalCharacters) * 100);
 
     res.json({
-      text: extractedText,
+      text: text,
       bookId: book._id,
       readingId: reading._id,
-      currentPage: startPage,
-      endPage,
-      totalPages,
-      hasMore: endPage < totalPages,
-      progress: Math.round((endPage / totalPages) * 100),
+      currentOffset: requestedOffset,
+      nextOffset: endOffset,
+      totalCharacters: book.totalCharacters,
+      charactersRead: endOffset,
+      hasMore: hasMore,
+      progress: progress,
+      chunkSize: text.length,
     });
   } catch (error) {
-    // Nettoyage en cas d'erreur
-    await Promise.all([
-      tempFilePath && unlink(tempFilePath).catch(() => {}),
-      tempPartialPath && unlink(tempPartialPath).catch(() => {}),
-    ]);
+    if (tempFilePath) {
+      await unlink(tempFilePath).catch(() => {});
+    }
 
     console.error('Error extracting PDF:', error);
     res.status(500).json({

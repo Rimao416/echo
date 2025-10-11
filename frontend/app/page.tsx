@@ -32,11 +32,23 @@ interface ApiErrorResponse {
   requiredCredits?: number;
 }
 
+interface ExtendedBookData {
+  bookId: string;
+  readingId: string;
+  currentOffset: number;
+  nextOffset: number;
+  totalCharacters: number;
+  charactersRead: number;
+  hasMore: boolean;
+  progress: number;
+  chunkSize: number;
+}
+
 export default function EchoTTS() {
   const [text, setText] = useState<string>('');
   const [pdfFile, setPdfFile] = useState<File | null>(null);
-  const [bookData, setBookData] = useState<BookData | null>(null);
-  const [currentPageStart, setCurrentPageStart] = useState<number>(1);
+  const [bookData, setBookData] = useState<ExtendedBookData | null>(null);
+  const [currentOffset, setCurrentOffset] = useState<number>(0);
   const [isExtracting, setIsExtracting] = useState<boolean>(false);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -46,7 +58,6 @@ export default function EchoTTS() {
   const [showSettings, setShowSettings] = useState<boolean>(false);
   const [errorInfo, setErrorInfo] = useState<ErrorInfo | null>(null);
   const [mode, setMode] = useState<'text' | 'pdf'>('text');
-  const [pagesPerBatch] = useState<number>(5);
   const [quotaInfo, setQuotaInfo] = useState<QuotaInfo | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -77,45 +88,43 @@ export default function EchoTTS() {
     });
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || file.type !== 'application/pdf') {
-      showError('error', 'Veuillez sélectionner un fichier PDF valide');
-      return;
-    }
-
-    setPdfFile(file);
+  const extractPdfChunk = async (offset: number) => {
+    if (!pdfFile) return;
+    
     setIsExtracting(true);
     setErrorInfo(null);
 
     try {
       const formData = new FormData();
-      formData.append('pdf', file);
-      formData.append('startPage', '1');
-      formData.append('pageCount', pagesPerBatch.toString());
+      formData.append('pdf', pdfFile);
+      formData.append('offset', offset.toString());
 
       const response = await fetch(`${API_BASE_URL}/extract-pdf`, {
         method: 'POST',
         body: formData,
       });
 
-      if (!response.ok) throw new Error('Erreur lors de l\'extraction du PDF');
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Erreur lors de l\'extraction');
+      }
 
       const data = await response.json();
       
       setBookData({
         bookId: data.bookId,
         readingId: data.readingId,
-        totalPages: data.totalPages,
-        currentPage: data.currentPage,
-        endPage: data.endPage,
+        currentOffset: data.currentOffset,
+        nextOffset: data.nextOffset,
+        totalCharacters: data.totalCharacters,
+        charactersRead: data.charactersRead,
         hasMore: data.hasMore,
-        progress: data.progress
+        progress: data.progress,
+        chunkSize: data.chunkSize,
       });
       
       setText(data.text);
-      setCurrentPageStart(data.currentPage);
-      setMode('pdf');
+      setCurrentOffset(data.nextOffset);
       
     } catch (err) {
       const error = err as Error;
@@ -125,100 +134,30 @@ export default function EchoTTS() {
     }
   };
 
-  const loadNextBatch = async () => {
-    if (!pdfFile || !bookData) return;
-    setIsExtracting(true);
-    setErrorInfo(null);
-
-    try {
-      const nextPageStart = bookData.endPage + 1;
-      const formData = new FormData();
-      formData.append('pdf', pdfFile);
-      formData.append('startPage', nextPageStart.toString());
-      formData.append('pageCount', pagesPerBatch.toString());
-
-      const response = await fetch(`${API_BASE_URL}/extract-pdf`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) throw new Error('Erreur lors de l\'extraction');
-
-      const data = await response.json();
-      setBookData(prev => prev ? ({
-        ...prev,
-        currentPage: data.currentPage,
-        endPage: data.endPage,
-        hasMore: data.hasMore,
-        progress: data.progress
-      }) : null);
-      
-      setText(data.text);
-      setCurrentPageStart(data.currentPage);
-      await updateProgress(data.currentPage, data.endPage);
-      
-    } catch (err) {
-      const error = err as Error;
-      showError('error', 'Impossible de charger les pages suivantes', error.message);
-    } finally {
-      setIsExtracting(false);
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || file.type !== 'application/pdf') {
+      showError('error', 'Veuillez sélectionner un fichier PDF valide');
+      return;
     }
+
+    setPdfFile(file);
+    setCurrentOffset(0);
+    setMode('pdf');
+    await extractPdfChunk(0);
   };
 
-  const loadPreviousBatch = async () => {
-    if (!pdfFile || !bookData || currentPageStart <= 1) return;
-    setIsExtracting(true);
-    setErrorInfo(null);
-
-    try {
-      const prevPageStart = Math.max(1, currentPageStart - pagesPerBatch);
-      const formData = new FormData();
-      formData.append('pdf', pdfFile);
-      formData.append('startPage', prevPageStart.toString());
-      formData.append('pageCount', pagesPerBatch.toString());
-
-      const response = await fetch(`${API_BASE_URL}/extract-pdf`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) throw new Error('Erreur lors de l\'extraction');
-
-      const data = await response.json();
-      setBookData(prev => prev ? ({
-        ...prev,
-        currentPage: data.currentPage,
-        endPage: data.endPage,
-        hasMore: data.hasMore,
-        progress: data.progress
-      }) : null);
-      
-      setText(data.text);
-      setCurrentPageStart(data.currentPage);
-      
-    } catch (err) {
-      const error = err as Error;
-      showError('error', 'Impossible de charger les pages précédentes', error.message);
-    } finally {
-      setIsExtracting(false);
-    }
-  };
-
-  const updateProgress = async (currentPage: number, lastReadPage: number) => {
+  const loadNextChunk = async () => {
     if (!bookData) return;
-    try {
-      await fetch(`${API_BASE_URL}/update-progress`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          readingId: bookData.readingId,
-          currentPage,
-          lastReadPage
-        })
-      });
-    } catch (err) {
-      console.error('Erreur mise à jour progression:', err);
-    }
+    await extractPdfChunk(bookData.nextOffset);
+  };
+
+  const loadPreviousChunk = async () => {
+    if (!bookData || currentOffset === 0) return;
+    
+    // Pour revenir en arrière, il faudrait stocker l'historique des offsets
+    // Pour simplifier, on repart du début
+    showError('info', 'Pour revenir en arrière, rechargez le PDF depuis le début');
   };
 
   const handleGenerate = async () => {
@@ -298,7 +237,7 @@ export default function EchoTTS() {
   const clearPdf = () => {
     setPdfFile(null);
     setBookData(null);
-    setCurrentPageStart(1);
+    setCurrentOffset(0);
     setMode('text');
     setText('');
     if (audioUrl) {
@@ -310,7 +249,7 @@ export default function EchoTTS() {
   const handleAudioEnded = () => {
     setIsPlaying(false);
     if (mode === 'pdf' && bookData?.hasMore) {
-      setTimeout(() => loadNextBatch(), 1000);
+      setTimeout(() => loadNextChunk(), 1000);
     }
   };
 
@@ -356,15 +295,32 @@ export default function EchoTTS() {
             />
 
             {pdfFile && bookData && (
-              <PdfInfo
-                pdfFile={pdfFile}
-                bookData={bookData}
-                isExtracting={isExtracting}
-                currentPageStart={currentPageStart}
-                onClear={clearPdf}
-                onPrevious={loadPreviousBatch}
-                onNext={loadNextBatch}
-              />
+              <div className="bg-slate-900/50 backdrop-blur-sm rounded-2xl border border-slate-800/50 p-4">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex-1">
+                    <div className="font-medium">{pdfFile.name}</div>
+                    <div className="text-sm text-slate-400 mt-1">
+                      {bookData.charactersRead.toLocaleString()} / {bookData.totalCharacters.toLocaleString()} caractères
+                    </div>
+                  </div>
+                  <button
+                    onClick={clearPdf}
+                    className="text-red-400 hover:text-red-300 text-sm"
+                  >
+                    Fermer
+                  </button>
+                </div>
+                
+                <div className="flex gap-2">
+                  <button
+                    onClick={loadNextChunk}
+                    disabled={!bookData.hasMore || isExtracting}
+                    className="flex-1 px-4 py-2 bg-violet-600/20 hover:bg-violet-600/30 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {isExtracting ? 'Chargement...' : bookData.hasMore ? 'Charger la suite' : 'Terminé'}
+                  </button>
+                </div>
+              </div>
             )}
 
             <TextEditor
@@ -374,23 +330,22 @@ export default function EchoTTS() {
               isGenerating={isGenerating}
               isPlaying={isPlaying}
               hasAudio={!!audioUrl}
-              currentPage={bookData?.currentPage}
-              endPage={bookData?.endPage}
+              currentPage={undefined}
+              endPage={undefined}
               onTextChange={setText}
               onGenerate={handleGenerate}
               onTogglePlayPause={togglePlayPause}
               onDownload={handleDownload}
             />
-            {audioUrl && (
-  <AudioVisualizer
-    isPlaying={isPlaying}
-    audioRef={audioRef}
-    audioUrl={audioUrl}
-    onEnded={handleAudioEnded}
-  />
-)}
 
-           
+            {audioUrl && (
+              <AudioVisualizer
+                isPlaying={isPlaying}
+                audioRef={audioRef}
+                audioUrl={audioUrl}
+                onEnded={handleAudioEnded}
+              />
+            )}
           </div>
 
           <div className="space-y-6">
@@ -405,17 +360,47 @@ export default function EchoTTS() {
                 speed={speed}
                 onSpeedChange={setSpeed}
                 apiBaseUrl={API_BASE_URL}
-                pagesPerBatch={pagesPerBatch}
+                pagesPerBatch={0}
               />
             )}
 
-            <Guide pagesPerBatch={pagesPerBatch} />
+ <div className="bg-slate-900/50 backdrop-blur-sm rounded-2xl border border-slate-800/50 p-6">
+  <h3 className="font-semibold mb-4 text-sm text-slate-400">Guide</h3>
+  <div className="text-xs text-slate-500 space-y-3">
+    <p>
+      ✨ Extraction par <strong>500 caractères minimum</strong> jusqu'au prochain point
+    </p>
+    <p>
+      📖 Cliquez sur "Charger la suite" pour continuer la lecture
+    </p>
+    <p>
+      🎧 L'audio se génère automatiquement après chaque chunk
+    </p>
+  </div>
+</div>
+
+
 
             {bookData && (
-              <Statistics 
-                bookData={bookData} 
-                pagesPerBatch={pagesPerBatch} 
-              />
+              <div className="bg-gradient-to-br from-violet-600/10 to-purple-600/10 border border-violet-500/30 rounded-2xl p-6">
+                <h3 className="font-semibold mb-4 text-sm">Statistiques</h3>
+                <div className="space-y-3 text-sm">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Caractères lus</span>
+                    <span className="font-bold text-violet-400">
+                      {bookData.charactersRead.toLocaleString()} / {bookData.totalCharacters.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Progression</span>
+                    <span className="font-bold text-purple-400">{bookData.progress}%</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Dernier chunk</span>
+                    <span className="font-bold text-slate-300">{bookData.chunkSize} caractères</span>
+                  </div>
+                </div>
+              </div>
             )}
           </div>
         </div>
